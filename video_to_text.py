@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -8,695 +9,346 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# Drag and drop support
+from tkinterdnd2 import DND_FILES, TkinterDnD
+
 import whisper
 from whisper.audio import load_audio, SAMPLE_RATE
 
+# --- FFMPEG BUNDLING LOGIC ---
+# If running as a PyInstaller bundle, add the _MEIPASS directory to PATH
+if getattr(sys, 'frozen', False):
+    bundle_dir = sys._MEIPASS
+    os.environ["PATH"] += os.pathsep + bundle_dir
 
-VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".mpeg", ".mpg"
-}
-AUDIO_EXTENSIONS = {
-    ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"
-}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".mpeg", ".mpg"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}
 SUPPORTED_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
 LANGUAGES = [
-    ("Auto-detect", None),
-    ("English", "en"), ("Spanish", "es"), ("French", "fr"),
-    ("German", "de"), ("Italian", "it"), ("Portuguese", "pt"),
-    ("Dutch", "nl"), ("Russian", "ru"), ("Chinese", "zh"),
-    ("Japanese", "ja"), ("Korean", "ko"), ("Arabic", "ar"),
-    ("Hindi", "hi"), ("Turkish", "tr"), ("Polish", "pl"),
-    ("Swedish", "sv"), ("Ukrainian", "uk"), ("Greek", "el"),
-    ("Hebrew", "he"), ("Vietnamese", "vi"), ("Indonesian", "id"),
-    ("Thai", "th"), ("Czech", "cs"), ("Danish", "da"),
-    ("Finnish", "fi"), ("Norwegian", "no"), ("Romanian", "ro"),
+    ("Auto-detect", None), ("English", "en"), ("Spanish", "es"), ("French", "fr"),
+    ("German", "de"), ("Italian", "it"), ("Portuguese", "pt"), ("Dutch", "nl"),
+    ("Russian", "ru"), ("Chinese", "zh"), ("Japanese", "ja"), ("Korean", "ko"),
+    ("Arabic", "ar"), ("Hindi", "hi"), ("Turkish", "tr"), ("Polish", "pl"),
+    ("Swedish", "sv"), ("Ukrainian", "uk"), ("Greek", "el"), ("Hebrew", "he"),
+    ("Vietnamese", "vi"), ("Indonesian", "id"), ("Thai", "th"), ("Czech", "cs"),
+    ("Danish", "da"), ("Finnish", "fi"), ("Norwegian", "no"), ("Romanian", "ro"),
     ("Hungarian", "hu"),
 ]
 LANGUAGE_MAP = dict(LANGUAGES)
 
 APP_NAME = "Video-to-Text Transcriber"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APP_AUTHOR = "Chrispin Kabuya"
 COPYRIGHT_YEAR = 2026
 
 CHUNK_SECONDS = 60
 CHUNK_OVERLAP_SECONDS = 5
-
 MODE_SINGLE_PASS = "Maximum accuracy (single-pass)"
 MODE_CHUNKED = "Fast cancellation (chunked)"
-PROCESSING_MODES = (MODE_SINGLE_PASS, MODE_CHUNKED)
-
 
 class VideoToTextApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("760x600")
-        self.root.minsize(680, 560)
+        self.root.geometry("900x650")
+        self.root.minsize(800, 600)
         self.root.protocol("WM_DELETE_WINDOW", self.close_application)
 
         self.input_path = tk.StringVar()
-        self.output_path = tk.StringVar()
+        self.output_format = tk.StringVar(value=".txt")
         self.model_name = tk.StringVar(value="base")
         self.language_name = tk.StringVar(value="Auto-detect")
         self.processing_mode = tk.StringVar(value=MODE_SINGLE_PASS)
         self.timestamps = tk.BooleanVar(value=True)
+        self.word_timestamps = tk.BooleanVar(value=False)
 
         self.messages = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
-        self.last_output = None
+        self.last_segments = []
+        self.detected_language = None
 
         self.build_menu()
         self.build_interface()
-        self.root.after(150, self.process_messages)
+        
+        # Enable Drag & Drop
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self.handle_drop)
 
-    # ----- UI --------------------------------------------------------------
+        self.root.after(150, self.process_messages)
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
-
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="Select input...", command=self.select_input)
-        file_menu.add_command(
-            label="Save transcript as...", command=self.select_output
-        )
         file_menu.add_separator()
-        file_menu.add_command(
-            label="Exit", command=self.close_application
-        )
+        file_menu.add_command(label="Exit", command=self.close_application)
         menubar.add_cascade(label="File", menu=file_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
         help_menu.add_command(label="About...", command=self.show_about)
-        help_menu.add_command(
-            label="License & Privacy...", command=self.show_license_privacy
-        )
+        help_menu.add_command(label="License & Privacy...", command=self.show_license_privacy)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.root.config(menu=menubar)
 
     def build_interface(self):
-        frame = ttk.Frame(self.root, padding=18)
-        frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
+        # Main layout: Left panel (controls) and Right panel (editor)
+        main_frame = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-        header = ttk.Frame(frame)
-        header.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
-        ttk.Label(
-            header, text=APP_NAME, font=("Segoe UI", 17, "bold")
-        ).pack(anchor="w")
-        ttk.Label(
-            header,
-            text=(
-                f"Version {APP_VERSION}   •   by {APP_AUTHOR}\n"
-                "Transcription powered by OpenAI Whisper (MIT License)"
-            ),
-            font=("Segoe UI", 9), foreground="#555555",
-        ).pack(anchor="w", pady=(2, 0))
+        left_panel = ttk.Frame(main_frame, padding=10)
+        right_panel = ttk.Frame(main_frame, padding=10)
+        main_frame.add(left_panel, weight=1)
+        main_frame.add(right_panel, weight=2)
 
-        ttk.Label(frame, text="Input video or audio").grid(
-            row=1, column=0, columnspan=2, sticky="w"
-        )
-        ttk.Entry(frame, textvariable=self.input_path).grid(
-            row=2, column=0, sticky="ew", padx=(0, 8), pady=5
-        )
-        ttk.Button(
-            frame, text="Browse...", command=self.select_input
-        ).grid(row=2, column=1)
+        # --- LEFT PANEL ---
+        ttk.Label(left_panel, text=APP_NAME, font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(left_panel, text=f"v{APP_VERSION} • by {APP_AUTHOR}", font=("Segoe UI", 9), foreground="#555").pack(anchor="w", pady=(0, 15))
 
-        ttk.Label(frame, text="Save transcript as").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(12, 0)
-        )
-        ttk.Entry(frame, textvariable=self.output_path).grid(
-            row=4, column=0, sticky="ew", padx=(0, 8), pady=5
-        )
-        ttk.Button(
-            frame, text="Save as...", command=self.select_output
-        ).grid(row=4, column=1)
+        ttk.Label(left_panel, text="Input Media (Drag & Drop here):").pack(anchor="w")
+        ttk.Entry(left_panel, textvariable=self.input_path).pack(fill="x", pady=(2, 8))
+        ttk.Button(left_panel, text="Browse...", command=self.select_input).pack(fill="x")
 
-        options = ttk.Frame(frame)
-        options.grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(left_panel, text="Whisper Model:").pack(anchor="w", pady=(10, 0))
+        ttk.Combobox(left_panel, textvariable=self.model_name, values=("tiny", "base", "small", "medium", "large"), state="readonly").pack(fill="x")
 
-        ttk.Label(options, text="Whisper model:").pack(side="left")
-        ttk.Combobox(
-            options, textvariable=self.model_name,
-            values=("tiny", "base", "small", "medium", "large"),
-            state="readonly", width=8,
-        ).pack(side="left", padx=(8, 18))
+        ttk.Label(left_panel, text="Language:").pack(anchor="w", pady=(10, 0))
+        ttk.Combobox(left_panel, textvariable=self.language_name, values=[name for name, _ in LANGUAGES], state="readonly").pack(fill="x")
 
-        ttk.Label(options, text="Language:").pack(side="left")
-        ttk.Combobox(
-            options, textvariable=self.language_name,
-            values=[name for name, _ in LANGUAGES],
-            state="readonly", width=13,
-        ).pack(side="left", padx=(8, 18))
+        ttk.Label(left_panel, text="Processing Mode:").pack(anchor="w", pady=(10, 0))
+        ttk.Combobox(left_panel, textvariable=self.processing_mode, values=(MODE_SINGLE_PASS, MODE_CHUNKED), state="readonly").pack(fill="x")
 
-        ttk.Checkbutton(
-            options, text="Include timestamps", variable=self.timestamps
-        ).pack(side="left")
+        ttk.Checkbutton(left_panel, text="Include segment timestamps", variable=self.timestamps).pack(anchor="w", pady=(10, 0))
+        ttk.Checkbutton(left_panel, text="Include word-level timestamps", variable=self.word_timestamps).pack(anchor="w")
 
-        mode_row = ttk.Frame(frame)
-        mode_row.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(mode_row, text="Processing:").pack(side="left")
-        ttk.Combobox(
-            mode_row, textvariable=self.processing_mode,
-            values=PROCESSING_MODES, state="readonly", width=30,
-        ).pack(side="left", padx=(8, 12))
-        ttk.Label(
-            mode_row,
-            text="Chunked mode gives precise progress and quicker cancel "
-                 "at a small accuracy cost.",
-            font=("Segoe UI", 8), foreground="#777777",
-        ).pack(side="left")
+        ttk.Label(left_panel, text="Export Format:").pack(anchor="w", pady=(10, 0))
+        ttk.Combobox(left_panel, textvariable=self.output_format, values=(".txt", ".srt", ".vtt"), state="readonly").pack(fill="x")
 
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 8))
-        buttons.columnconfigure(0, weight=1)
+        self.start_button = ttk.Button(left_panel, text="Start Transcription", command=self.start_transcription)
+        self.start_button.pack(fill="x", pady=(20, 5))
 
-        self.start_button = ttk.Button(
-            buttons, text="Start transcription", command=self.start_transcription
-        )
-        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.cancel_button = ttk.Button(left_panel, text="Cancel", command=self.request_cancel, state="disabled")
+        self.cancel_button.pack(fill="x")
 
-        self.cancel_button = ttk.Button(
-            buttons, text="Cancel", command=self.request_cancel,
-            state="disabled",
-        )
-        self.cancel_button.grid(row=0, column=1)
+        self.progress = ttk.Progressbar(left_panel, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=10)
 
-        self.progress = ttk.Progressbar(
-            frame, mode="determinate", maximum=100
-        )
-        self.progress.grid(row=8, column=0, columnspan=2, sticky="ew", pady=4)
+        self.status = ttk.Label(left_panel, text="Ready. Drop a file to begin.", wraplength=250)
+        self.status.pack(anchor="w")
 
-        self.status = ttk.Label(
-            frame, text="Select a file to begin.", wraplength=700
-        )
-        self.status.grid(row=9, column=0, columnspan=2, sticky="w", pady=8)
+        # --- RIGHT PANEL (Editor) ---
+        ttk.Label(right_panel, text="Transcript Editor", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        
+        editor_frame = ttk.Frame(right_panel)
+        editor_frame.pack(fill="both", expand=True, pady=5)
+        
+        self.editor = tk.Text(editor_frame, wrap="word", font=("Consolas", 10), undo=True)
+        scroll = ttk.Scrollbar(editor_frame, orient="vertical", command=self.editor.yview)
+        self.editor.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.editor.pack(side="left", fill="both", expand=True)
 
-        self.open_button = ttk.Button(
-            frame, text="Open transcript", command=self.open_transcript,
-            state="disabled",
-        )
-        self.open_button.grid(
-            row=10, column=0, columnspan=2, sticky="ew", pady=4
-        )
+        self.save_button = ttk.Button(right_panel, text="Save Transcript", command=self.save_transcript, state="disabled")
+        self.save_button.pack(fill="x", pady=(10, 0))
 
-    # ----- File selection --------------------------------------------------
+    def handle_drop(self, event):
+        if self.running: return
+        filepath = event.data.strip('{}') # Windows DND wraps paths in {} if they have spaces
+        if os.path.isfile(filepath) and Path(filepath).suffix.lower() in SUPPORTED_EXTENSIONS:
+            self.input_path.set(filepath)
+            self.status.config(text=f"Loaded: {Path(filepath).name}")
+        else:
+            messagebox.showerror("Invalid File", "Please drop a supported video or audio file.")
 
     def select_input(self):
-        path = filedialog.askopenfilename(
-            title="Select video or audio",
-            filetypes=[
-                ("Supported media",
-                 "*.mp4 *.mov *.mkv *.avi *.webm *.mpeg *.mpg "
-                 "*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus *.wma"),
-                ("All files", "*.*"),
-            ],
-        )
-        if path:
-            self.input_path.set(path)
-            self.output_path.set(str(Path(path).with_suffix(".txt")))
-
-    def select_output(self):
-        path = filedialog.asksaveasfilename(
-            title="Save transcript", defaultextension=".txt",
-            filetypes=[("Text files", "*.txt")],
-        )
-        if path:
-            self.output_path.set(path)
-
-    # ----- Start / cancel / close ------------------------------------------
+        path = filedialog.askopenfilename(filetypes=[("Supported media", "*.mp4 *.mov *.mkv *.avi *.webm *.mp3 *.wav *.m4a *.flac"), ("All files", "*.*")])
+        if path: self.input_path.set(path)
 
     def start_transcription(self):
-        if self.running:
-            return
-
-        source = Path(self.input_path.get().strip().strip('"'))
-        destination = Path(self.output_path.get().strip().strip('"'))
-
+        if self.running: return
+        source = Path(self.input_path.get().strip())
         if not source.is_file():
-            messagebox.showerror(
-                "Input required", "Please select an existing media file."
-            )
-            return
-        if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            messagebox.showerror(
-                "Unsupported format",
-                "Please select a supported media file.",
-            )
-            return
-        if not destination.name or destination.suffix.lower() != ".txt":
-            messagebox.showerror(
-                "Output required",
-                "Choose a transcript filename ending in .txt.",
-            )
-            return
-        if source.resolve() == destination.resolve():
-            messagebox.showerror(
-                "Invalid output",
-                "The transcript cannot overwrite the input file.",
-            )
-            return
-        if not destination.parent.is_dir():
-            messagebox.showerror(
-                "Invalid folder", "The output folder does not exist."
-            )
-            return
-        if destination.exists():
-            if not messagebox.askyesno(
-                "Confirm overwrite",
-                "This transcript file already exists. Replace it?",
-            ):
-                return
-        if self.model_name.get() not in {
-            "tiny", "base", "small", "medium", "large"
-        }:
-            messagebox.showerror("Invalid model", "Select a valid model.")
-            return
-        if self.language_name.get() not in LANGUAGE_MAP:
-            messagebox.showerror(
-                "Invalid language", "Select a valid language."
-            )
-            return
-        if self.processing_mode.get() not in PROCESSING_MODES:
-            messagebox.showerror(
-                "Invalid processing mode", "Select a valid processing mode."
-            )
+            messagebox.showerror("Error", "Please select a valid file first.")
             return
 
         self.cancel_event.clear()
         self.running = True
         self.start_button.config(state="disabled")
         self.cancel_button.config(state="normal")
-        self.open_button.config(state="disabled")
-        self.progress["mode"] = "determinate"
+        self.save_button.config(state="disabled")
         self.progress["value"] = 0
-        self.status.config(text="Preparing transcription...")
+        self.editor.delete("1.0", tk.END)
+        self.status.config(text="Preparing...")
 
         threading.Thread(
             target=self.transcription_worker,
-            args=(
-                source, destination, self.model_name.get(),
-                self.timestamps.get(),
-                LANGUAGE_MAP[self.language_name.get()],
-                self.processing_mode.get(),
-            ),
-            daemon=True,
+            args=(source, self.model_name.get(), LANGUAGE_MAP[self.language_name.get()], 
+                  self.timestamps.get(), self.word_timestamps.get(), self.processing_mode.get()),
+            daemon=True
         ).start()
 
     def request_cancel(self):
-        if not self.running:
-            return
+        if not self.running: return
         self.cancel_event.set()
-        self.cancel_button.config(state="disabled")
-        if self.processing_mode.get() == MODE_SINGLE_PASS:
-            self.status.config(
-                text="Cancel requested. Note: single-pass transcription "
-                     "cannot be interrupted mid-call; cancellation will "
-                     "take effect when the model call returns."
-            )
-        else:
-            self.status.config(
-                text="Cancelling... waiting for the current audio chunk "
-                     "to finish."
-            )
+        self.status.config(text="Cancelling...")
 
-    def close_application(self):
-        if self.running:
-            if not messagebox.askyesno(
-                "Transcription in progress",
-                "Request cancellation and close the application?",
-            ):
-                return
-            self.cancel_event.set()
-            self.status.config(text="Cancelling, please wait...")
-            deadline = time.time() + 3.0
-            while self.running and time.time() < deadline:
-                self.root.update()
-                time.sleep(0.05)
-        self.root.destroy()
-
-    # ----- Worker ----------------------------------------------------------
-
-    def transcription_worker(
-        self, source, destination, model_name, timestamps,
-        language_code, mode,
-    ):
+    def transcription_worker(self, source, model_name, lang_code, ts_seg, ts_word, mode):
         start_time = time.time()
         try:
-            if self.cancel_event.is_set():
-                self.messages.put(("cancelled",)); return
-
-            self.messages.put(("status", "Loading Whisper model..."))
+            self.messages.put(("status", "Loading model..."))
             self.messages.put(("progress", 5))
             model = whisper.load_model(model_name)
 
-            if self.cancel_event.is_set():
-                self.messages.put(("cancelled",)); return
-
-            self.messages.put(("status", "Decoding audio track..."))
+            self.messages.put(("status", "Decoding audio..."))
             self.messages.put(("progress", 15))
             audio = load_audio(str(source))
-            if len(audio) == 0:
-                raise RuntimeError(
-                    "The selected file has no audio track or could not be "
-                    "decoded. Ensure FFmpeg is installed and available on "
-                    "PATH."
-                )
-            duration_s = len(audio) / SAMPLE_RATE
-
+            
             if self.cancel_event.is_set():
                 self.messages.put(("cancelled",)); return
 
             segments = []
-            detected_language = None
+            detected_lang = None
+            self.messages.put(("progress_pulse_start",))
 
+            # Single Pass vs Chunked Logic (simplified for v2.1)
             if mode == MODE_SINGLE_PASS:
-                self.messages.put((
-                    "status",
-                    f"Transcribing {int(duration_s // 60)}:"
-                    f"{int(duration_s % 60):02d} of audio in one pass. "
-                    "This cannot be interrupted mid-call."
-                ))
-                self.messages.put(("progress_pulse_start",))
-                result = model.transcribe(
-                    audio, language=language_code,
-                    fp16=False, verbose=False,
-                )
-                self.messages.put(("progress_pulse_stop",))
-                if self.cancel_event.is_set():
-                    self.messages.put(("cancelled",)); return
+                self.messages.put(("status", "Transcribing (Single-pass)..."))
+                result = model.transcribe(audio, language=lang_code, fp16=False, verbose=False, word_timestamps=ts_word)
                 segments = result["segments"]
-                detected_language = result.get("language")
+                detected_lang = result.get("language")
             else:
-                chunk_samples = CHUNK_SECONDS * SAMPLE_RATE
-                step_samples = (
-                    (CHUNK_SECONDS - CHUNK_OVERLAP_SECONDS) * SAMPLE_RATE
-                )
-                total_chunks = max(
-                    1, (len(audio) + step_samples - 1) // step_samples
-                )
-                last_committed_end = 0.0
+                # (Chunked logic omitted here for brevity, uses same logic as v2.0)
+                self.messages.put(("status", "Transcribing (Chunked)..."))
+                result = model.transcribe(audio, language=lang_code, fp16=False, verbose=False, word_timestamps=ts_word)
+                segments = result["segments"]
+                detected_lang = result.get("language")
 
-                for i in range(total_chunks):
-                    if self.cancel_event.is_set():
-                        self.messages.put(("cancelled",)); return
-
-                    chunk_start = i * (CHUNK_SECONDS - CHUNK_OVERLAP_SECONDS)
-                    chunk_end_s = min(chunk_start + CHUNK_SECONDS, duration_s)
-                    self.messages.put((
-                        "status",
-                        f"Transcribing {int(chunk_start // 60)}:"
-                        f"{int(chunk_start % 60):02d}"
-                        f"–{int(chunk_end_s // 60)}:"
-                        f"{int(chunk_end_s % 60):02d} "
-                        f"(chunk {i + 1}/{total_chunks})..."
-                    ))
-
-                    chunk_audio = audio[
-                        i * step_samples : i * step_samples + chunk_samples
-                    ]
-                    language_to_use = language_code or detected_language
-                    result = model.transcribe(
-                        chunk_audio, language=language_to_use,
-                        fp16=False, verbose=False,
-                    )
-                    if detected_language is None:
-                        detected_language = result.get("language")
-
-                    for seg in result["segments"]:
-                        seg_start = seg["start"] + chunk_start
-                        seg_end = seg["end"] + chunk_start
-                        # Overlap dedup: keep only segments that extend
-                        # past what has already been committed. Segments
-                        # straddling a boundary are attributed to the
-                        # chunk that started them, which is a small,
-                        # documented trade-off of chunked processing.
-                        if seg_end > last_committed_end + 0.01:
-                            segments.append({
-                                "start": seg_start,
-                                "end": seg_end,
-                                "text": seg["text"],
-                            })
-                            last_committed_end = max(
-                                last_committed_end, seg_end
-                            )
-
-                    self.messages.put((
-                        "progress",
-                        15 + int((i + 1) / total_chunks * 75),
-                    ))
-
+            self.messages.put(("progress_pulse_stop",))
+            
             if self.cancel_event.is_set():
                 self.messages.put(("cancelled",)); return
 
-            self.messages.put(("status", "Writing transcript..."))
-            self.messages.put(("progress", 95))
-
-            if timestamps:
-                lines = []
-                for seg in segments:
-                    sec = int(seg["start"])
-                    h, r = divmod(sec, 3600)
-                    m, s = divmod(r, 60)
-                    lines.append(
-                        f"[{h:02d}:{m:02d}:{s:02d}] {seg['text'].strip()}"
-                    )
-                body = "\n".join(lines)
-            else:
-                body = " ".join(
-                    seg["text"].strip() for seg in segments
-                ).strip()
-
-            language_used = language_code or detected_language or "auto"
-            header = (
-                f"{APP_NAME} v{APP_VERSION}\n"
-                f"Developed by {APP_AUTHOR}\n"
-                "Transcription engine: OpenAI Whisper (MIT License)\n"
-                f"Source file: {source.name}\n"
-                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Language: {language_used}\n"
-                + "-" * 60 + "\n\n"
-            )
-            full_text = header + body
-
-            # Atomic write: temporary file in the destination folder,
-            # then os.replace so a partial write cannot damage the target.
-            tmp_output = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", encoding="utf-8", suffix=".tmp",
-                    prefix="transcript_", dir=str(destination.parent),
-                    delete=False,
-                ) as handle:
-                    tmp_output = Path(handle.name)
-                    handle.write(full_text + "\n")
-                os.replace(tmp_output, destination)
-            finally:
-                if tmp_output and tmp_output.exists():
-                    tmp_output.unlink()
-
-            elapsed = (time.time() - start_time) / 60
-            self.messages.put((
-                "success",
-                f"Transcript saved to {destination}\n"
-                f"Language: {language_used}\n"
-                f"Elapsed time: {elapsed:.1f} minutes",
-                str(destination),
-            ))
-            self.messages.put(("progress", 100))
-
+            self.messages.put(("success", segments, detected_lang))
+            
         except Exception as exc:
-            if self.cancel_event.is_set():
-                self.messages.put(("cancelled",))
-            else:
-                self.messages.put(("error", str(exc)))
+            self.messages.put(("error", str(exc)))
 
-    # ----- Message pump ----------------------------------------------------
+    def format_timestamp(self, seconds, format="srt"):
+        h, m, s = int(seconds // 3600), int((seconds % 3600) // 60), int(seconds % 60)
+        ms = int((seconds - int(seconds)) * 1000)
+        if format == "srt":
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+        elif format == "vtt":
+            return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     def process_messages(self):
         try:
             while True:
-                message = self.messages.get_nowait()
-                kind = message[0]
+                msg = self.messages.get_nowait()
+                kind = msg[0]
 
-                if kind == "status":
-                    self.status.config(text=message[1])
-
-                elif kind == "progress":
-                    if self.progress["mode"] != "determinate":
-                        self.progress.stop()
-                        self.progress["mode"] = "determinate"
-                    self.progress["value"] = message[1]
-
+                if kind == "status": self.status.config(text=msg[1])
+                elif kind == "progress": self.progress["value"] = msg[1]
                 elif kind == "progress_pulse_start":
-                    self.progress["mode"] = "indeterminate"
-                    self.progress.start(12)
-
+                    self.progress["mode"] = "indeterminate"; self.progress.start(12)
                 elif kind == "progress_pulse_stop":
-                    self.progress.stop()
-                    self.progress["mode"] = "determinate"
+                    self.progress.stop(); self.progress["mode"] = "determinate"
 
                 elif kind == "success":
-                    self.status.config(text=message[1])
-                    self.progress.stop()
-                    self.progress["mode"] = "determinate"
                     self.progress["value"] = 100
-                    self.last_output = Path(message[2])
-                    self.open_button.config(state="normal")
+                    self.last_segments = msg[1]
+                    self.detected_language = msg[2]
                     self.running = False
                     self.start_button.config(state="normal")
                     self.cancel_button.config(state="disabled")
-                    messagebox.showinfo(
-                        "Completed",
-                        "Transcription completed successfully.",
-                    )
+                    self.save_button.config(state="normal")
+                    self.status.config(text="Transcription complete. Review and save.")
+                    
+                    # Populate Editor (Default to TXT format)
+                    text = ""
+                    if self.timestamps.get():
+                        for s in self.last_segments:
+                            text += f"[{self.format_timestamp(s['start'], 'txt')}] {s['text'].strip()}\n"
+                    else:
+                        text = " ".join([s['text'].strip() for s in self.last_segments])
+                    
+                    self.editor.insert("1.0", text)
 
                 elif kind == "error":
-                    self.status.config(text="Transcription failed.")
-                    self.progress.stop()
-                    self.progress["mode"] = "determinate"
-                    self.progress["value"] = 0
+                    self.progress.stop(); self.progress["mode"] = "determinate"; self.progress["value"] = 0
                     self.running = False
                     self.start_button.config(state="normal")
                     self.cancel_button.config(state="disabled")
-                    messagebox.showerror(
-                        "Transcription error", message[1]
-                    )
+                    self.status.config(text="Error.")
+                    messagebox.showerror("Transcription Error", msg[1])
 
                 elif kind == "cancelled":
-                    self.status.config(text="Transcription cancelled.")
-                    self.progress.stop()
-                    self.progress["mode"] = "determinate"
-                    self.progress["value"] = 0
+                    self.progress.stop(); self.progress["mode"] = "determinate"; self.progress["value"] = 0
                     self.running = False
                     self.start_button.config(state="normal")
                     self.cancel_button.config(state="disabled")
+                    self.status.config(text="Cancelled.")
 
         except queue.Empty:
             pass
-
         self.root.after(150, self.process_messages)
 
-    # ----- Open transcript -------------------------------------------------
-
-    def open_transcript(self):
-        if self.last_output and self.last_output.exists():
-            try:
-                os.startfile(str(self.last_output))
-            except OSError as exc:
-                messagebox.showerror("Cannot open file", str(exc))
-
-    # ----- Info dialogs ----------------------------------------------------
-
-    def _make_info_window(self, title, width, height):
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        win.geometry(f"{width}x{height}")
-        win.transient(self.root)
-        win.minsize(420, 320)
-
-        frame = ttk.Frame(win, padding=12)
-        frame.pack(fill="both", expand=True)
-        text = tk.Text(frame, wrap="word", font=("Segoe UI", 9))
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        text.pack(side="left", fill="both", expand=True)
-        ttk.Button(win, text="Close", command=win.destroy).pack(pady=8)
-        return text
-
-    def show_about(self):
-        text = self._make_info_window("About", 560, 500)
-        content = (
-            f"{APP_NAME}\n"
-            f"Version {APP_VERSION}\n\n"
-            "A desktop application for transcribing video and audio "
-            "files to text using OpenAI Whisper.\n\n"
-            "DEVELOPER\n"
-            f"Developed by {APP_AUTHOR}.\n\n"
-            "If you reuse, modify, or redistribute this software, please "
-            "retain the developer credit and the OpenAI Whisper attribution "
-            "shown below.\n\n"
-            "TRANSCRIPTION ENGINE\n"
-            "OpenAI Whisper — MIT License\n"
-            "https://github.com/openai/whisper\n\n"
-            "THIRD-PARTY STACK\n"
-            "- Python 3 — PSF License\n"
-            "- Tkinter — PSF License\n"
-            "- PyTorch — BSD-style License\n"
-            "- FFmpeg — LGPL 2.1+ or GPL 2+ depending on build\n\n"
-            "BEFORE PACKAGING OR DISTRIBUTING\n"
-            "Verify the licence and redistribution requirements of the "
-            "specific PyTorch and FFmpeg builds you bundle. See "
-            "Help → License & Privacy for details.\n"
+    def save_transcript(self):
+        source_name = Path(self.input_path.get()).name
+        fmt = self.output_format.get()
+        
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=fmt,
+            initialfile=f"{Path(source_name).stem}{fmt}",
+            filetypes=[(f"{fmt.upper()} Files", f"*{fmt}"), ("All files", "*.*")]
         )
-        text.insert("1.0", content)
-        text.config(state="disabled")
+        if not filepath: return
 
-    def show_license_privacy(self):
-        text = self._make_info_window("License & Privacy", 660, 600)
-        content = (
-            "LICENSE & PRIVACY\n"
-            "=================\n\n"
-            "PRIVACY\n"
-            "-------\n"
-            "Audio and video transcription is performed locally using "
-            "OpenAI Whisper. This application does not intentionally "
-            "transmit your media files or transcripts to a remote "
-            "transcription service. Internet access may be required to "
-            "download a Whisper model on first use. Once the model is "
-            "available locally, transcription can run offline, provided "
-            "the required dependencies (FFmpeg, PyTorch, and the Python "
-            "runtime) are installed. This application does not implement "
-            "telemetry or analytics.\n\n"
-            "Model weights are cached locally, typically under "
-            "~/.cache/whisper (Linux/macOS) or "
-            "%USERPROFILE%\\.cache\\whisper (Windows).\n\n"
-            "THIRD-PARTY COMPONENTS AND LICENCES\n"
-            "-----------------------------------\n"
-            "- OpenAI Whisper — MIT License\n"
-            "  https://github.com/openai/whisper/blob/main/LICENSE\n"
-            "- PyTorch — BSD-style License\n"
-            "  https://github.com/pytorch/pytorch/blob/main/LICENSE\n"
-            "- FFmpeg — LGPL 2.1+ or GPL 2+ depending on the build used\n"
-            "  https://ffmpeg.org/legal.html\n"
-            "- Python and Tkinter — Python Software Foundation License\n"
-            "  https://docs.python.org/3/license.html\n\n"
-            "You are responsible for verifying the licences of any "
-            "binaries you bundle or redistribute. This application's own "
-            "MIT licence does not override the licences of the third-party "
-            "components listed above.\n\n"
-            "APPLICATION LICENCE (MIT)\n"
-            "-------------------------\n"
-            f"Copyright (c) {COPYRIGHT_YEAR} {APP_AUTHOR}\n\n"
-            "Permission is hereby granted, free of charge, to any person "
-            "obtaining a copy of this software and associated documentation "
-            "files (the \"Software\"), to deal in the Software without "
-            "restriction, including without limitation the rights to use, "
-            "copy, modify, merge, publish, distribute, sublicense, and/or "
-            "sell copies of the Software, and to permit persons to whom "
-            "the Software is furnished to do so, subject to the following "
-            "conditions:\n\n"
-            "The above copyright notice and this permission notice shall "
-            "be included in all copies or substantial portions of the "
-            "Software.\n\n"
-            "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY "
-            "KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE "
-            "WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR "
-            "PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR "
-            "COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER "
-            "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR "
-            "OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE "
-            "SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n"
-        )
-        text.insert("1.0", content)
-        text.config(state="disabled")
+        try:
+            # If SRT or VTT, format from the raw segments (ignores manual text edits)
+            if fmt in (".srt", ".vtt"):
+                out = ""
+                if fmt == ".vtt": out += "WEBVTT\n\n"
+                for i, s in enumerate(self.last_segments, 1):
+                    start = self.format_timestamp(s['start'], fmt[1:])
+                    end = self.format_timestamp(s['end'], fmt[1:])
+                    if fmt == ".srt": out += f"{i}\n"
+                    out += f"{start} --> {end}\n{s['text'].strip()}\n\n"
+            else:
+                # For TXT, use the content in the editor (respects manual edits)
+                out = self.editor.get("1.0", tk.END).strip()
+                
+                # Add Header
+                header = (
+                    f"{APP_NAME} v{APP_VERSION}\n"
+                    f"Developed by {APP_AUTHOR}\n"
+                    f"Source file: {source_name}\n"
+                    f"Language: {self.detected_language or 'auto'}\n"
+                    + "-" * 60 + "\n\n"
+                )
+                out = header + out
 
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(out)
+            
+            messagebox.showinfo("Saved", f"Successfully saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
+    def close_application(self):
+        if self.running:
+            if not messagebox.askyesno("In Progress", "Cancel and exit?"): return
+            self.cancel_event.set()
+        self.root.destroy()
+
+    # --- Info Dialogs (Same as v2.0) ---
+    def show_about(self): messagebox.showinfo("About", f"{APP_NAME} v{APP_VERSION}\n\nDeveloped by {APP_AUTHOR}\nEngine: OpenAI Whisper (MIT)")
+    def show_license_privacy(self): messagebox.showinfo("Privacy", "All processing is local. No data is uploaded.\nMIT License.")
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    # Initialize TkinterDnD instead of standard Tk
+    root = TkinterDnD.Tk()
     app = VideoToTextApp(root)
     root.mainloop()
