@@ -2,7 +2,7 @@
 
 A free Windows desktop application for converting video and audio recordings into text using OpenAI Whisper.
  
-![App Screenshot](screenshots/mainscreen.png)
+![App Screenshot](screenshots/mainscreen_v2.1.0.png)
 
 ## Features
 

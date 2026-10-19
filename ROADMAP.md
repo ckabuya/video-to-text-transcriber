@@ -19,11 +19,11 @@ This document outlines the planned features, improvements, and long-term goals f
 
 ## 🟡 v2.1.0 (Quality of Life & Usability)
 *Focus: Making the app easier and more pleasant to use for everyday tasks.*
-- [ ] **SRT/VTT Export:** Add the ability to save transcripts as standard subtitle formats (`.srt`, `.vtt`).
-- [ ] **Drag-and-Drop:** Allow users to drag media files directly into the application window.
-- [ ] **Bundled FFmpeg:** Include `ffmpeg.exe` inside the PyInstaller build and automatically configure the `PATH` so users don't need to install it separately.
-- [ ] **In-App Editor:** Add a text box to the GUI where users can review and correct the transcript before saving.
-- [ ] **Word-Level Timestamps:** Add an option to generate word-by-word timestamps for precise subtitle alignment.
+- [x] **SRT/VTT Export:** Add the ability to save transcripts as standard subtitle formats (`.srt`, `.vtt`).
+- [x] **Drag-and-Drop:** Allow users to drag media files directly into the application window.
+- [x] **Bundled FFmpeg:** Include `ffmpeg.exe` inside the PyInstaller build and automatically configure the `PATH` so users don't need to install it separately.
+- [x] **In-App Editor:** Add a text box to the GUI where users can review and correct the transcript before saving.
+- [x] **Word-Level Timestamps:** Add an option to generate word-by-word timestamps for precise subtitle alignment.
 
 ---
 
