@@ -9,4 +9,5 @@ dist/
 extracted_audio*
 *.wav
 *.mp3
+*.exe
 .DS_Store

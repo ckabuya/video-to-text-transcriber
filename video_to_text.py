@@ -1,5 +1,6 @@
 import os
 import sys
+
 import tempfile
 import threading
 import time
@@ -14,6 +15,20 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import whisper
 from whisper.audio import load_audio, SAMPLE_RATE
+
+# --- FIX FOR WINDOWED EXE (Whisper/tqdm NoneType write error) ---
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    class DummyStream:
+        def write(self, text):
+            pass
+        def flush(self):
+            pass
+        def isatty(self):
+            return False
+
+    sys.stdout = DummyStream()
+    sys.stderr = DummyStream()
+# ----------------------------------------------------------------
 
 # --- FFMPEG BUNDLING LOGIC ---
 # If running as a PyInstaller bundle, add the _MEIPASS directory to PATH
