@@ -37,7 +37,7 @@ This document outlines the planned features, improvements, and long-term goals f
 
 ---
 
-## 🟣 v4.0.0 (Advanced AI & Enterprise)
+## 🟣 v4.0.0 (Advanced Audio & Professional Workflows)
 *Focus: Advanced audio analysis and meeting transcriptions.*
 - [ ] **Speaker Diarization:** Integrate `pyannote.audio` to identify and label different speakers (e.g., `[Speaker 1]`, `[Speaker 2]`).
 - [ ] **Audio Trimming:** UI controls to trim the start and end times of a media file before transcription.
