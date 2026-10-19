@@ -1,7 +1,8 @@
 # Video-to-Text Transcriber
 
 A free Windows desktop application for converting video and audio recordings into text using OpenAI Whisper.
-![App Screenshot](screenshots/mainscreenshot.png)
+ 
+![App Screenshot](screenshots/mainscreen.png)
 
 ## Features
 
