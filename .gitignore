@@ -1,0 +1,12 @@
+myenv/
+venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.log
+extracted_audio*
+*.wav
+*.mp3
+.DS_Store
