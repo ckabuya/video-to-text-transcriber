@@ -48,3 +48,5 @@ Transcription speed and accuracy depend on the selected model, recording quality
 ## Licence
 
 See the LICENSE file for the licence terms applicable to this project.
+
+See the [Roadmap](ROADMAP.md) for upcoming features.
