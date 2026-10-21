@@ -1,8 +1,10 @@
 import os
 import sys
+import json
 import threading
 import time
 import queue
+import logging
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -13,6 +15,8 @@ from faster_whisper import WhisperModel
 
 # Suppress HuggingFace symlink warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR) 
 
 # --- FFMPEG BUNDLING LOGIC ---
 if getattr(sys, 'frozen', False):
@@ -36,29 +40,35 @@ LANGUAGES = [
 LANGUAGE_MAP = dict(LANGUAGES)
 
 APP_NAME = "Video-to-Text Transcriber"
-APP_VERSION = "3.0.0-beta" 
+APP_VERSION = "3.0.0-rc" 
 APP_AUTHOR = "Chrispin Kabuya"
+CONFIG_FILE = Path.home() / ".video_to_text_config.json"
 
 class VideoToTextApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("1000x700")
-        self.root.minsize(900, 600)
+        self.root.geometry("1000x750")
+        self.root.minsize(950, 650)
         self.root.protocol("WM_DELETE_WINDOW", self.close_application)
 
+        # Settings Variables
         self.output_format = tk.StringVar(value=".txt")
         self.model_name = tk.StringVar(value="base")
         self.language_name = tk.StringVar(value="Auto-detect")
         self.timestamps = tk.BooleanVar(value=True)
         self.word_timestamps = tk.BooleanVar(value=False)
+        
+        # Phase 3 Variables
+        self.use_gpu = tk.BooleanVar(value=False)
+        self.custom_model_dir = tk.StringVar()
 
         self.messages = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
-        
-        # Queue for batch processing
         self.file_queue = []
+        
+        self.load_config()
         
         self.build_menu()
         self.build_interface()
@@ -67,6 +77,28 @@ class VideoToTextApp:
         self.root.dnd_bind('<<Drop>>', self.handle_drop)
 
         self.root.after(100, self.process_messages)
+
+    # ----- CONFIG MANAGEMENT -----
+    def load_config(self):
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    config = json.load(f)
+                    self.use_gpu.set(config.get("use_gpu", False))
+                    self.custom_model_dir.set(config.get("model_dir", ""))
+            except Exception:
+                pass # Ignore corrupted config
+
+    def save_config(self):
+        config = {
+            "use_gpu": self.use_gpu.get(),
+            "model_dir": self.custom_model_dir.get().strip()
+        }
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config, f)
+        except Exception:
+            pass
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
@@ -91,8 +123,8 @@ class VideoToTextApp:
         ttk.Label(left_panel, text=APP_NAME, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(left_panel, text=f"v{APP_VERSION} • by {APP_AUTHOR}", font=("Segoe UI", 9), foreground="#555").pack(anchor="w", pady=(0, 10))
 
-        # Settings Grid
-        settings_frame = ttk.LabelFrame(left_panel, text="Settings", padding=10)
+        # Basic Settings Grid
+        settings_frame = ttk.LabelFrame(left_panel, text="Transcription Settings", padding=10)
         settings_frame.pack(fill="x", pady=(0, 10))
         
         ttk.Label(settings_frame, text="Model:").grid(row=0, column=0, sticky="w", pady=2)
@@ -107,13 +139,25 @@ class VideoToTextApp:
         ttk.Checkbutton(settings_frame, text="Segment timestamps", variable=self.timestamps).grid(row=3, column=0, columnspan=2, sticky="w", pady=(5,0))
         ttk.Checkbutton(settings_frame, text="Word-level timestamps", variable=self.word_timestamps).grid(row=4, column=0, columnspan=2, sticky="w")
 
+        # Advanced Settings (Phase 3)
+        adv_frame = ttk.LabelFrame(left_panel, text="Advanced (GPU & Storage)", padding=10)
+        adv_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Checkbutton(adv_frame, text="Use Nvidia GPU (CUDA) if available", variable=self.use_gpu).pack(anchor="w", pady=(0, 5))
+
+        ttk.Label(adv_frame, text="Model Download Folder (Leave blank for default):").pack(anchor="w")
+        dir_frame = ttk.Frame(adv_frame)
+        dir_frame.pack(fill="x", pady=(2, 0))
+        
+        ttk.Entry(dir_frame, textvariable=self.custom_model_dir).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ttk.Button(dir_frame, text="...", width=3, command=self.browse_model_dir).pack(side="right")
+
         # Batch Queue
         ttk.Label(left_panel, text="Batch Queue (Drag & Drop here):", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        
         queue_frame = ttk.Frame(left_panel)
         queue_frame.pack(fill="both", expand=True, pady=(2, 10))
         
-        self.queue_tree = ttk.Treeview(queue_frame, columns=("File", "Status"), show="headings", height=10)
+        self.queue_tree = ttk.Treeview(queue_frame, columns=("File", "Status"), show="headings", height=5)
         self.queue_tree.heading("File", text="File Name")
         self.queue_tree.heading("Status", text="Status")
         self.queue_tree.column("File", width=180)
@@ -123,7 +167,6 @@ class VideoToTextApp:
         self.queue_tree.configure(yscrollcommand=q_scroll.set)
         q_scroll.pack(side="right", fill="y")
         self.queue_tree.pack(side="left", fill="both", expand=True)
-
         self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_select)
 
         # Controls
@@ -132,7 +175,6 @@ class VideoToTextApp:
         
         ttk.Button(controls_frame, text="Add Files...", command=self.add_files).pack(side="left", expand=True, fill="x", padx=(0, 5))
         ttk.Button(controls_frame, text="Clear", command=self.clear_queue).pack(side="left", expand=True, fill="x", padx=(0, 5))
-        
         self.start_button = ttk.Button(controls_frame, text="▶ Start Batch", command=self.start_transcription)
         self.start_button.pack(side="left", expand=True, fill="x")
 
@@ -146,7 +188,7 @@ class VideoToTextApp:
         self.status.pack(anchor="w", pady=5)
 
         # --- RIGHT PANEL (Transcript Editor) ---
-        ttk.Label(right_panel, text="Transcript Viewer (Last Processed)", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(right_panel, text="Transcript Viewer", font=("Segoe UI", 12, "bold")).pack(anchor="w")
         editor_frame = ttk.Frame(right_panel)
         editor_frame.pack(fill="both", expand=True, pady=5)
         
@@ -156,9 +198,13 @@ class VideoToTextApp:
         scroll.pack(side="right", fill="y")
         self.editor.pack(side="left", fill="both", expand=True)
 
+    def browse_model_dir(self):
+        path = filedialog.askdirectory(title="Select Model Download Folder")
+        if path:
+            self.custom_model_dir.set(path)
+
     def handle_drop(self, event):
         if self.running: return
-        # TkinterDnD returns paths in a list-like string format
         files = self.root.tk.splitlist(event.data)
         added = 0
         for f in files:
@@ -171,17 +217,13 @@ class VideoToTextApp:
 
     def add_files(self):
         if self.running: return
-        paths = filedialog.askopenfilenames(
-            filetypes=[("Supported media", "*.mp4 *.mkv *.mp3 *.wav *.m4a *.flac"), ("All files", "*.*")]
-        )
+        paths = filedialog.askopenfilenames(filetypes=[("Supported media", "*.mp4 *.mkv *.mp3 *.wav *.m4a *.flac"), ("All files", "*.*")])
         for p in paths:
             self.add_file_to_queue(Path(p))
 
     def add_file_to_queue(self, path):
-        # Prevent duplicates
         for item in self.file_queue:
             if item['path'] == path: return
-        
         item_id = self.queue_tree.insert("", tk.END, values=(path.name, "Pending"))
         self.file_queue.append({"path": path, "id": item_id, "status": "Pending"})
 
@@ -192,12 +234,9 @@ class VideoToTextApp:
         self.status.config(text="Queue cleared.")
 
     def on_queue_select(self, event):
-        """Loads the transcript of a selected completed file into the editor."""
         if self.running: return
-        
         selected = self.queue_tree.selection()
         if not selected: return
-        
         item_id = selected[0]
         
         for item in self.file_queue:
@@ -225,6 +264,8 @@ class VideoToTextApp:
     def start_transcription(self):
         if self.running or not self.file_queue: return
         
+        self.save_config() # Save settings for next time
+        
         self.cancel_event.clear()
         self.running = True
         self.start_button.config(state="disabled")
@@ -232,7 +273,6 @@ class VideoToTextApp:
         self.progress["value"] = 0
         self.status.config(text="Starting batch process...")
 
-        # Reset all statuses to Pending
         for item in self.file_queue:
             self.queue_tree.set(item["id"], "Status", "Pending")
 
@@ -243,7 +283,9 @@ class VideoToTextApp:
                 LANGUAGE_MAP[self.language_name.get()], 
                 self.timestamps.get(), 
                 self.word_timestamps.get(),
-                self.output_format.get()
+                self.output_format.get(),
+                self.use_gpu.get(),
+                self.custom_model_dir.get().strip()
             ),
             daemon=True
         ).start()
@@ -253,24 +295,35 @@ class VideoToTextApp:
         self.cancel_event.set()
         self.status.config(text="Cancelling batch...")
 
-    def transcription_worker(self, model_name, lang_code, ts_seg, ts_word, out_fmt):
+    def transcription_worker(self, model_name, lang_code, ts_seg, ts_word, out_fmt, use_gpu, custom_dir):
         try:
-            self.messages.put(("status", f"Loading model '{model_name}'..."))
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            download_root = custom_dir if custom_dir else None
+            
+            # --- GPU FALLBACK LOGIC ---
+            if use_gpu:
+                try:
+                    self.messages.put(("status", f"Loading model '{model_name}' on GPU (CUDA)..."))
+                    model = WhisperModel(model_name, device="cuda", compute_type="float16", download_root=download_root)
+                except Exception as e:
+                    self.messages.put(("status", "GPU failed. Falling back to CPU..."))
+                    time.sleep(2) # Let user read the warning
+                    model = WhisperModel(model_name, device="cpu", compute_type="int8", download_root=download_root)
+            else:
+                self.messages.put(("status", f"Loading model '{model_name}' on CPU..."))
+                model = WhisperModel(model_name, device="cpu", compute_type="int8", download_root=download_root)
             
             total_files = len(self.file_queue)
             
             for index, item in enumerate(self.file_queue):
                 if self.cancel_event.is_set():
                     self.messages.put(("update_status", item["id"], "Cancelled"))
-                    continue # Skip remaining files but mark them cancelled
+                    continue
 
                 file_path = item["path"]
                 self.messages.put(("update_status", item["id"], "Processing..."))
                 self.messages.put(("status", f"Processing {index + 1}/{total_files}: {file_path.name}"))
                 
                 try:
-                    # Transcribe
                     segments_generator, info = model.transcribe(
                         str(file_path), language=lang_code, word_timestamps=ts_word, vad_filter=True
                     )
@@ -279,9 +332,7 @@ class VideoToTextApp:
                     extracted_segments = []
                     
                     for segment in segments_generator:
-                        if self.cancel_event.is_set():
-                            break
-                        # Update main progress bar (combines file progress + current file %)
+                        if self.cancel_event.is_set(): break
                         file_pct = min(100, (segment.end / info.duration) * 100) if info.duration > 0 else 0
                         overall_pct = int(((index / total_files) * 100) + ((file_pct / total_files)))
                         self.messages.put(("progress", overall_pct))
@@ -296,12 +347,10 @@ class VideoToTextApp:
                         self.messages.put(("update_status", item["id"], "Cancelled"))
                         continue
 
-                    # Save File Automatically
                     out_path = file_path.with_suffix(out_fmt)
                     self.save_file(out_path, extracted_segments, file_path.name, info.language, out_fmt, ts_seg)
                     
                     self.messages.put(("update_status", item["id"], "Done"))
-                    # Send text to the editor for the most recently completed file
                     self.messages.put(("update_editor", extracted_segments, ts_seg))
                     item["segments"] = extracted_segments
 
@@ -354,12 +403,9 @@ class VideoToTextApp:
                 msg = self.messages.get_nowait()
                 kind = msg[0]
 
-                if kind == "status": 
-                    self.status.config(text=msg[1])
-                elif kind == "progress": 
-                    self.progress["value"] = msg[1]
-                elif kind == "lang": 
-                    self.detected_language = msg[1]
+                if kind == "status": self.status.config(text=msg[1])
+                elif kind == "progress": self.progress["value"] = msg[1]
+                elif kind == "lang": self.detected_language = msg[1]
                 elif kind == "update_status":
                     self.queue_tree.set(msg[1], "Status", msg[2])
                 elif kind == "update_editor":
