@@ -124,6 +124,8 @@ class VideoToTextApp:
         q_scroll.pack(side="right", fill="y")
         self.queue_tree.pack(side="left", fill="both", expand=True)
 
+        self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_select)
+
         # Controls
         controls_frame = ttk.Frame(left_panel)
         controls_frame.pack(fill="x")
@@ -188,6 +190,32 @@ class VideoToTextApp:
         self.queue_tree.delete(*self.queue_tree.get_children())
         self.file_queue.clear()
         self.status.config(text="Queue cleared.")
+
+    def on_queue_select(self, event):
+        """Loads the transcript of a selected completed file into the editor."""
+        if self.running: return
+        
+        selected = self.queue_tree.selection()
+        if not selected: return
+        
+        item_id = selected[0]
+        
+        # Find the item in our internal queue
+        for item in self.file_queue:
+            if item["id"] == item_id:
+                if item.get("segments"):
+                    # We have the text for this file! Show it.
+                    self.editor.delete("1.0", tk.END)
+                    if self.timestamps.get():
+                        text = "".join([f"[{self.format_timestamp(s['start'], 'txt')}] {s['text'].strip()}\n" for s in item["segments"]])
+                    else:
+                        text = " ".join([s['text'].strip() for s in item["segments"]])
+                    self.editor.insert("1.0", text)
+                else:
+                    # File hasn't been processed yet
+                    self.editor.delete("1.0", tk.END)
+                    self.editor.insert("1.0", f"File '{item['path'].name}' is {item['status']}.")
+                break
 
     def start_transcription(self):
         if self.running or not self.file_queue: return
@@ -270,6 +298,7 @@ class VideoToTextApp:
                     self.messages.put(("update_status", item["id"], "Done"))
                     # Send text to the editor for the most recently completed file
                     self.messages.put(("update_editor", extracted_segments, ts_seg))
+                    item["segments"] = extracted_segments
 
                 except Exception as e:
                     self.messages.put(("update_status", item["id"], "Error"))
