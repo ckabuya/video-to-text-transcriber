@@ -200,19 +200,24 @@ class VideoToTextApp:
         
         item_id = selected[0]
         
-        # Find the item in our internal queue
         for item in self.file_queue:
             if item["id"] == item_id:
                 if item.get("segments"):
-                    # We have the text for this file! Show it.
                     self.editor.delete("1.0", tk.END)
-                    if self.timestamps.get():
-                        text = "".join([f"[{self.format_timestamp(s['start'], 'txt')}] {s['text'].strip()}\n" for s in item["segments"]])
+                    fmt = self.output_format.get()
+                    segments = item["segments"]
+                    
+                    if fmt == ".srt":
+                        text = "".join([f"{i+1}\n{self.format_timestamp(s['start'], 'srt')} --> {self.format_timestamp(s['end'], 'srt')}\n{s['text'].strip()}\n\n" for i, s in enumerate(segments)])
+                    elif fmt == ".vtt":
+                        text = "WEBVTT\n\n" + "".join([f"{self.format_timestamp(s['start'], 'vtt')} --> {self.format_timestamp(s['end'], 'vtt')}\n{s['text'].strip()}\n\n" for s in segments])
+                    elif self.timestamps.get():
+                        text = "".join([f"[{self.format_timestamp(s['start'], 'txt')}] {s['text'].strip()}\n" for s in segments])
                     else:
-                        text = " ".join([s['text'].strip() for s in item["segments"]])
+                        text = " ".join([s['text'].strip() for s in segments])
+                        
                     self.editor.insert("1.0", text)
                 else:
-                    # File hasn't been processed yet
                     self.editor.delete("1.0", tk.END)
                     self.editor.insert("1.0", f"File '{item['path'].name}' is {item['status']}.")
                 break
@@ -360,11 +365,18 @@ class VideoToTextApp:
                 elif kind == "update_editor":
                     segments = msg[1]
                     show_ts = msg[2]
+                    fmt = self.output_format.get()
                     self.editor.delete("1.0", tk.END)
-                    if show_ts:
+                    
+                    if fmt == ".srt":
+                        text = "".join([f"{i+1}\n{self.format_timestamp(s['start'], 'srt')} --> {self.format_timestamp(s['end'], 'srt')}\n{s['text'].strip()}\n\n" for i, s in enumerate(segments)])
+                    elif fmt == ".vtt":
+                        text = "WEBVTT\n\n" + "".join([f"{self.format_timestamp(s['start'], 'vtt')} --> {self.format_timestamp(s['end'], 'vtt')}\n{s['text'].strip()}\n\n" for s in segments])
+                    elif show_ts:
                         text = "".join([f"[{self.format_timestamp(s['start'], 'txt')}] {s['text'].strip()}\n" for s in segments])
                     else:
                         text = " ".join([s['text'].strip() for s in segments])
+                        
                     self.editor.insert("1.0", text)
                 
                 elif kind == "batch_done":
