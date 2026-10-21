@@ -1,9 +1,9 @@
-name: Build Windows Executable
+name: Build Windows Executable and Installer
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: # Allows you to manually trigger the build from the Actions tab
+    branches: [ main, feature/v3.0.0 ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -19,19 +19,6 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: Download and Extract FFmpeg
-      shell: powershell
-      run: |
-        Write-Host "Downloading FFmpeg..."
-        Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
-        Write-Host "Extracting FFmpeg..."
-        Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_temp"
-        
-        # Find ffmpeg.exe inside the nested folders and move it to the root directory
-        $ffmpegExe = Get-ChildItem -Path "ffmpeg_temp" -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
-        Move-Item -Path $ffmpegExe.FullName -Destination ".\ffmpeg.exe"
-        Write-Host "FFmpeg ready."
-
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
@@ -42,9 +29,7 @@ jobs:
       run: |
         python -m PyInstaller --clean --noconfirm --onedir --windowed `
           --name VideoToText `
-          --add-binary "ffmpeg.exe;." `
           --collect-all tkinterdnd2 `
-          --collect-data whisper `
           --hidden-import=tqdm `
           --hidden-import=pkg_resources.extern `
           --exclude-module pandas `
@@ -54,13 +39,23 @@ jobs:
           --exclude-module matplotlib `
           video_to_text.py
 
-    - name: Compress Build into ZIP
+    - name: Install Inno Setup
+      run: choco install innosetup -y
+
+    - name: Build Installer
+      run: |
+        # Run Inno Setup compiler (iscc) on our script
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+    - name: Compress Portable ZIP
       shell: powershell
       run: |
-        Compress-Archive -Path "dist\VideoToText\*" -DestinationPath "VideoToText-Windows.zip"
+        Compress-Archive -Path "dist\VideoToText\*" -DestinationPath "VideoToText-Portable.zip"
 
-    - name: Upload Artifact
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: VideoToText-Windows-Build
-        path: VideoToText-Windows.zip
+        name: VideoToText-v3.0.0-Build
+        path: |
+          VideoToText-Portable.zip
+          installer/Output/VideoToText-Setup.exe
