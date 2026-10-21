@@ -1,4 +1,2 @@
-openai-whisper
-moviepy
-pyinstaller
 tkinterdnd2
+faster-whisper
